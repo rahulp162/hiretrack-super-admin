@@ -25,6 +25,98 @@ ASSET_MIGRATION_API="https://admin.hiretrack.in/api/migration/download"
 MONGODB_VERSION="${MONGODB_VERSION:-7.0}"
 # NODE_VERSION_DEFAULT=20
 
+# Initialize BETA variable to avoid unbound variable errors
+# This will be properly set by init_beta_mode() later, but we need a default here
+BETA="${BETA:-false}"
+
+# Helper function to append BETA=true to query parameters when in beta mode
+append_beta_param() {
+    local url="$1"
+    local beta_value="${BETA:-false}"
+    
+    # If BETA is not set, check config.json as fallback
+    if [ "$beta_value" = "false" ] && [ -f "$CONFIG_PATH" ]; then
+        local config_beta
+        config_beta=$(jq -r '.beta // false' "$CONFIG_PATH" 2>/dev/null || echo "false")
+        # Normalize config value
+        if [ "$config_beta" = "true" ] || [ "$config_beta" = "1" ] || [ "$config_beta" = "yes" ]; then
+            beta_value="true"
+        fi
+    fi
+    
+    # Append BETA=true if beta mode is enabled
+    if [ "$beta_value" = "true" ]; then
+        if [[ "$url" == *"?"* ]]; then
+            echo "${url}&BETA=true"
+        else
+            echo "${url}?BETA=true"
+        fi
+    else
+        echo "$url"
+    fi
+}
+
+# Function to initialize and manage BETA mode from config.json
+init_beta_mode() {
+    # Ensure config.json exists
+    if [ ! -f "$CONFIG_PATH" ]; then
+        mkdir -p "$(dirname "$CONFIG_PATH")"
+        echo '{"autoUpdate": true, "installedVersion": "none", "beta": false}' > "$CONFIG_PATH"
+    fi
+    
+    # Read BETA from config.json first (if exists)
+    local CONFIG_BETA
+    CONFIG_BETA=$(jq -r '.beta // false' "$CONFIG_PATH" 2>/dev/null || echo "false")
+    
+    # Check for command line flag override
+    local BETA_FLAG="false"
+    for arg in "$@"; do
+        if [ "$arg" = "--beta" ] || [ "$arg" = "-beta" ]; then
+            BETA_FLAG="true"
+            break
+        fi
+    done
+    
+    # Priority: command line flag > config.json
+    if [ "$BETA_FLAG" = "true" ]; then
+        # Command line flag set - use true and save to config
+        BETA="true"
+    else
+        # Read from config.json
+        BETA="$CONFIG_BETA"
+    fi
+    
+    # Normalize BETA value to "true" or "false"
+    if [ "$BETA" = "true" ] || [ "$BETA" = "1" ] || [ "$BETA" = "yes" ]; then
+        BETA="true"
+    else
+        BETA="false"
+    fi
+    
+    # Save BETA to config.json if command line flag was used
+    if [ "$BETA_FLAG" = "true" ]; then
+        local CURRENT_CONFIG_BETA
+        CURRENT_CONFIG_BETA=$(jq -r '.beta // false' "$CONFIG_PATH" 2>/dev/null || echo "false")
+        # Normalize current config beta for comparison
+        if [ "$CURRENT_CONFIG_BETA" = "true" ] || [ "$CURRENT_CONFIG_BETA" = "1" ] || [ "$CURRENT_CONFIG_BETA" = "yes" ]; then
+            CURRENT_CONFIG_BETA="true"
+        else
+            CURRENT_CONFIG_BETA="false"
+        fi
+        
+        # Only save if different from current config
+        if [ "$CURRENT_CONFIG_BETA" != "$BETA" ]; then
+            write_config "beta" "$BETA"
+            echo "💾 BETA mode saved to config.json: $BETA" >&2
+        fi
+    fi
+    
+    # Display beta mode status
+    if [ "$BETA" = "true" ]; then
+        echo "🔷 BETA MODE ENABLED - Using development/test repository" >&2
+    fi
+}
+
 mkdir -p "$APP_INSTALL_DIR" "$BACKUP_DIR" "$TMP_INSTALL_DIR" "$LOG_DIR"
 
 # ------------------------------------------------
@@ -63,23 +155,7 @@ check_dep() {
     echo "✅ $CMD is available."
 }
 
-# get_machine_code() {
-#     local OS_TYPE
-#     OS_TYPE=$(uname | tr '[:upper:]' '[:lower:]')
-#     if [[ "$OS_TYPE" == "linux" ]]; then
-#         if [ -f /etc/machine-id ]; then
-#             cat /etc/machine-id
-#         else
-#             hostname | sha256sum | awk '{print $1}'
-#         fi
-#     elif [[ "$OS_TYPE" == "darwin" ]]; then
-#         # hostname | shasum -a 256 | awk '{print $1}'
-#         system_profiler SPHardwareDataType | awk '/Hardware UUID/ { print $3; }'
-#     else
-#         echo "❌ Unsupported OS: $OS_TYPE"
-#         exit 1
-#     fi
-# }
+
 
 get_machine_code() {
     local OS_TYPE
@@ -191,25 +267,63 @@ write_env_server_details() {
         BASE_URL="https://$SERVER_NAME"
     fi
 
-    # Remove existing BASE_URL line if exists
+    # Remove existing BASE_URL/NEXT_PUBLIC_BASE_URL lines if exists
     if [ -f "$ENV_FILE" ]; then
-        grep -v "^BASE_URL=" "$ENV_FILE" > "${ENV_FILE}.tmp" || true
+        grep -v "^BASE_URL=" "$ENV_FILE" | grep -v "^NEXT_PUBLIC_BASE_URL=" > "${ENV_FILE}.tmp" || true
     else
         touch "${ENV_FILE}.tmp"
     fi
 
-    # Write new BASE_URL
+    # Write new BASE_URL and NEXT_PUBLIC_BASE_URL
     echo "BASE_URL=$BASE_URL" >> "${ENV_FILE}.tmp"
+    echo "NEXT_PUBLIC_BASE_URL=$BASE_URL" >> "${ENV_FILE}.tmp"
     mv "${ENV_FILE}.tmp" "$ENV_FILE"
 
-    echo "✅ BASE_URL updated in $ENV_FILE ($BASE_URL)"
+    echo "✅ BASE_URL and NEXT_PUBLIC_BASE_URL updated in $ENV_FILE ($BASE_URL)"
 }
-
 
 write_config() {
     local KEY="$1"
     local VALUE="$2"
     jq --arg k "$KEY" --arg v "$VALUE" '.[$k]=$v' "$CONFIG_PATH" > "${CONFIG_PATH}.tmp" && mv "${CONFIG_PATH}.tmp" "$CONFIG_PATH"
+}
+
+# Set beta mode in config.json to true or false (standalone toggle)
+set_beta_config() {
+    local VALUE="$1"
+    if [ ! -f "$CONFIG_PATH" ]; then
+        mkdir -p "$(dirname "$CONFIG_PATH")"
+        echo '{"autoUpdate": true, "installedVersion": "none", "beta": false}' > "$CONFIG_PATH"
+    fi
+    write_config "beta" "$VALUE"
+    if [ "$VALUE" = "true" ]; then
+        echo "✅ Beta mode enabled in config.json ($CONFIG_PATH)"
+        echo "   Future updates will use the beta repository."
+    else
+        echo "✅ Beta mode disabled in config.json ($CONFIG_PATH)"
+        echo "   Future updates will use the production repository."
+    fi
+    
+    # Check if license.json exists before asking about upgrade
+    if [ ! -f "$LICENSE_PATH" ] || ! jq -e '.licenseKey' "$LICENSE_PATH" >/dev/null 2>&1; then
+        echo "✅ Beta mode configuration saved. Exiting."
+        echo "   Note: License not found. Please register a license first before upgrading."
+        exit 0
+    fi
+    
+    # Ask user if they want to upgrade the app (only if license exists)
+    echo ""
+    read -p "Do you want to upgrade the app now? (y/n): " UPGRADE_CHOICE
+    UPGRADE_CHOICE=$(echo "$UPGRADE_CHOICE" | tr '[:upper:]' '[:lower:]')
+    
+    if [ "$UPGRADE_CHOICE" = "y" ] || [ "$UPGRADE_CHOICE" = "yes" ]; then
+        echo ""
+        echo "🚀 Starting app upgrade..."
+        check_update_and_install "manually"
+    else
+        echo "✅ Beta mode configuration saved. Exiting."
+        exit 0
+    fi
 }
 
 # ------------------------------------------------
@@ -319,107 +433,6 @@ install_node() {
 
     fi
 }
-
-
-
-# install_node() {
-#     local APP_DIR="$1"
-#     local NODE_VERSION NODE_CLEAN NEEDS_INSTALL=false NEEDS_REMOVE=false
-
-#     if [ -n "$APP_DIR" ] && [ -f "$APP_DIR/.env" ]; then
-#         NODE_VERSION=$(grep -E '^NODE_VERSION=' "$APP_DIR/.env" | cut -d '=' -f2)
-#     fi
-
-#     if [ -z "$NODE_VERSION" ]; then
-#         echo "⚠️ NODE_VERSION not found in .env. Skipping installation."
-#         return 0
-#     fi
-
-#     NODE_CLEAN=$(echo "$NODE_VERSION" | sed 's/^v//') # remove leading v
-
-#     # --- Check installed version ---
-#     if command -v node >/dev/null 2>&1; then
-#         local CURRENT_FULL
-#         CURRENT_FULL=$(node -v | sed 's/^v//')
-
-#         if [ "$CURRENT_FULL" = "$NODE_CLEAN" ]; then
-#             echo "✅ Node.js $CURRENT_FULL already installed."
-#             return 0
-#         else
-#             echo "⚠ Found Node.js $CURRENT_FULL but need $NODE_CLEAN."
-#             NEEDS_REMOVE=true
-#             NEEDS_INSTALL=true
-#         fi
-#     else
-#         echo "⚠ Node.js not found."
-#         NEEDS_INSTALL=true
-#     fi
-
-#     # --- Remove existing Node.js ---
-#     if [ "$NEEDS_REMOVE" = "true" ]; then
-#         echo "🗑️ Removing existing Node.js installation..."
-
-#         sudo rm -rf /usr/local/lib/nodejs
-#         sudo rm -f /usr/local/bin/node
-#         sudo rm -f /usr/local/bin/npm
-#         sudo rm -f /usr/local/bin/npx
-
-#         sudo apt-get remove -y nodejs npm 2>/dev/null || true
-#         sudo apt-get purge -y nodejs npm 2>/dev/null || true
-#         sudo rm -rf /usr/lib/node_modules
-
-#         hash -r
-#         echo "✅ Existing Node.js removed."
-#     fi
-
-#     # --- Install EXACT version from nodejs.org ---
-#     if [ "$NEEDS_INSTALL" = "true" ]; then
-#         echo "📦 Installing Node.js $NODE_CLEAN (exact version)..."
-
-#         local ARCH
-#         local PLATFORM="linux"
-#         ARCH=$(uname -m)
-
-#         case "$ARCH" in
-#             x86_64) ARCH="x64" ;;
-#             aarch64|arm64) ARCH="arm64" ;;
-#             armv7l) ARCH="armv7l" ;;
-#             *) 
-#                 echo "❌ Unsupported architecture: $ARCH"
-#                 exit 1 
-#             ;;
-#         esac
-
-#         local NODE_DIR="/usr/local/lib/nodejs"
-#         sudo mkdir -p "$NODE_DIR"
-
-#         local TARFILE="node-v$NODE_CLEAN-$PLATFORM-$ARCH.tar.xz"
-#         local URL="https://nodejs.org/dist/v$NODE_CLEAN/$TARFILE"
-
-#         echo "⬇️ Downloading $URL"
-#         curl -fsSL "$URL" -o "/tmp/$TARFILE" || {
-#             echo "❌ Failed to download Node.js $NODE_CLEAN"
-#             exit 1
-#         }
-
-#         echo "📦 Extracting..."
-#         sudo tar -xJf "/tmp/$TARFILE" -C "$NODE_DIR"
-#         rm -f "/tmp/$TARFILE"
-
-#         # Symlink binaries
-#         sudo ln -sf "$NODE_DIR/node-v$NODE_CLEAN-$PLATFORM-$ARCH/bin/node" /usr/local/bin/node
-#         sudo ln -sf "$NODE_DIR/node-v$NODE_CLEAN-$PLATFORM-$ARCH/bin/npm"  /usr/local/bin/npm
-#         sudo ln -sf "$NODE_DIR/node-v$NODE_CLEAN-$PLATFORM-$ARCH/bin/npx"  /usr/local/bin/npx
-
-#         hash -r
-
-#         echo "🔍 Verifying..."
-#         node -v || { echo "❌ Node not installed properly"; exit 1; }
-#         npm -v || echo "⚠ npm missing (unexpected)"
-
-#         echo "✅ Installed Node.js $(node -v)"
-#     fi
-# }
 
 
 check_pm2() {
@@ -533,8 +546,13 @@ install_and_start_mongodb() {
 create_default_config() {
     local PASSED_EMAIL="${1:-}"
     if [ ! -f "$CONFIG_PATH" ]; then
-        echo '{"autoUpdate": true, "installedVersion": "none"}' > "$CONFIG_PATH"
+        echo '{"autoUpdate": true, "installedVersion": "none", "beta": false}' > "$CONFIG_PATH"
         echo "✅ Default config created at $CONFIG_PATH"
+    else
+        # Ensure beta field exists in existing config
+        if ! jq -e '.beta' "$CONFIG_PATH" >/dev/null 2>&1; then
+            write_config "beta" "false"
+        fi
     fi
 
     if [ -n "$PASSED_EMAIL" ]; then
@@ -703,10 +721,12 @@ validate_license_and_get_asset() {
     # --progress-bar shows download progress on stderr
     # Capture HTTP code from stdout (last line), progress shows on stderr
     echo "📥 Downloading asset with license validation..." >&2
+    local ASSET_URL="${ASSET_DOWNLOAD_API}?${QUERY_PARAMS}"
+    ASSET_URL=$(append_beta_param "$ASSET_URL")
     HTTP_CODE=$(curl -w "\n%{http_code}" -o "$TMP_FILE" \
         --progress-bar \
-        "$ASSET_DOWNLOAD_API?$QUERY_PARAMS" 2>&1 | grep -E '^[0-9]{3}$' | tail -n1 || echo "000")
-    
+        "$ASSET_URL" 2>&1 | grep -E '^[0-9]{3}$' | tail -n1 || echo "000")
+    # echo "ASSET_URL: $ASSET_URL" >&2
     # Check for curl errors (non-HTTP errors like network failures)
     if [ -z "$HTTP_CODE" ] || ! echo "$HTTP_CODE" | grep -qE '^[0-9]{3}$'; then
         echo "❌ Network error: Failed to connect to server. Please check your internet connection." >&2
@@ -759,7 +779,8 @@ validate_license_and_get_asset() {
 # Version Management
 # ------------------------------------------------
 check_latest_version() {
-    local RESPONSE=$(curl -s "$LATEST_VERSION_API")
+    local VERSION_URL=$(append_beta_param "$LATEST_VERSION_API")
+    local RESPONSE=$(curl -s "$VERSION_URL")
     if [ -z "$RESPONSE" ] || ! echo "$RESPONSE" | jq . >/dev/null 2>&1; then
         echo "❌ Failed to get latest version info."
         exit 1
@@ -776,45 +797,7 @@ check_latest_version() {
 # -------------------------------
 # Rollback helper function
 # -------------------------------
-# rollback() {
-#     local VERSION_TO_RESTORE="${1:-}"   # default to empty string if not passed
 
-#     if [ -z "$VERSION_TO_RESTORE" ]; then
-#         echo "❌ rollback() called without a version" | tee -a "$ROLLBACK_LOG_FILE"
-#         return 1
-#     fi
-
-#     # Ensure BACKUP_DIR is defined
-#     local BACKUP_DIR="${BACKUP_DIR:-$LOG_DIR/backups}"  
-#     local BACKUP_FILE="$BACKUP_DIR/backup-$VERSION_TO_RESTORE.tar"
-
-#     echo "🔄 Rolling back to version $VERSION_TO_RESTORE..." | tee -a "$ROLLBACK_LOG_FILE"
-
-#     # Remove current install directory
-#     # rm -rf "$APP_INSTALL_DIR" 2>&1 | tee -a "$ROLLBACK_LOG_FILE"
-#     if [ -d "$APP_INSTALL_DIR" ]; then
-#     sudo rm -rf --no-preserve-root "$APP_INSTALL_DIR" 2>&1 | tee -a "$ROLLBACK_LOG_FILE" || true
-#     fi
-
-#     if [ -f "$BACKUP_FILE" ]; then
-#         mkdir -p "$APP_INSTALL_DIR" 2>&1 | tee -a "$ROLLBACK_LOG_FILE"
-#         tar -xf "$BACKUP_FILE" -C "$APP_INSTALL_DIR" 2>&1 | tee -a "$ROLLBACK_LOG_FILE"
-#         cd "$APP_INSTALL_DIR" || exit
-#         echo "📦 Restoring dependencies..." | tee -a "$ROLLBACK_LOG_FILE"
-#         npm install --legacy-peer-deps 2>&1 | tee -a "$ROLLBACK_LOG_FILE"
-#         echo "🚀 Restarting previous version with PM2..." | tee -a "$ROLLBACK_LOG_FILE"
-
-#         # Check if PM2 is running and kill it
-#         pm2 kill 2>&1 | tee -a "$ROLLBACK_LOG_FILE" || true
-#         pm2 start "npm run start" --name "hiretrack-$VERSION_TO_RESTORE" --cwd "$APP_INSTALL_DIR" 2>&1 | tee -a "$ROLLBACK_LOG_FILE" || true
-#     else
-#         echo "⚠️ Backup not found. Killing PM2 processes..." | tee -a "$ROLLBACK_LOG_FILE"
-#         pm2 kill 2>&1 | tee -a "$ROLLBACK_LOG_FILE" || true
-#     fi
-
-#     echo "✅ Rollback completed." | tee -a "$ROLLBACK_LOG_FILE"
-#     write_config "installedVersion" "$VERSION_TO_RESTORE"
-# }
 
 
 
@@ -1201,7 +1184,7 @@ check_update_and_install() {
         rollback
         return 1
     fi
-    write_env_server_details ;
+    write_env_server_details
     check_pm2
     # ---------------------------------------------------
     # PM2 Restart Logic (fixed and robust)
@@ -1268,8 +1251,10 @@ run_migrations() {
     mkdir -p "$TMP_INSTALL_DIR" "$APP_INSTALL_DIR" "$LOG_DIR" >/dev/null 2>&1 || true
 
     # Call migration download API with currentVersion and requiredVersion (target)
+    local MIG_URL="${ASSET_MIGRATION_API}?currentVersion=$CURRENT_VERSION&requiredVersion=$TARGET_VERSION"
+    MIG_URL=$(append_beta_param "$MIG_URL")
     local MIG_RESPONSE
-    MIG_RESPONSE="$(curl -s "$ASSET_MIGRATION_API?currentVersion=$CURRENT_VERSION&requiredVersion=$TARGET_VERSION" 2>/dev/null || true)"
+    MIG_RESPONSE="$(curl -s "$MIG_URL" 2>/dev/null || true)"
     echo "MIG_RESPONSE: $MIG_RESPONSE" | tee -a "$LOG_DIR/migration.log"
     if [ -z "$MIG_RESPONSE" ] || ! echo "$MIG_RESPONSE" | jq . >/dev/null 2>&1; then
         echo "⚠️ Warning: Invalid or empty migration response — skipping migrations." | tee -a "$LOG_DIR/migration.log"
@@ -1550,6 +1535,7 @@ setup_nginx() {
 	# Configuration Paths
 	# ------------------------------------------------
 	CONFIG_PATH="$HOME/.hiretrack/config.json"
+	APP_INSTALL_DIR="$HOME/.hiretrack/APP"
 	APP_PORT="\${APP_PORT:-3000}"
 	NGINX_BACKUP_DIR="$HOME/.hiretrack/nginx-backups"
 	NGINX_CONF_DIR="/etc/nginx/sites-available"
@@ -1716,6 +1702,48 @@ setup_nginx() {
 		echo "{\"serverName\": \"\$DOMAIN_NAME\", \"email\": \"\$EMAIL\"}" > "\$CONFIG_PATH"       
 		echo "✅ Config created with domain and email: \$CONFIG_PATH"
 	    fi
+	}
+
+	# ------------------------------------------------
+	# Write BASE_URL and NEXT_PUBLIC_BASE_URL to .env
+	# ------------------------------------------------
+	write_env_server_details() {
+	    local ENV_FILE="\$APP_INSTALL_DIR/.env"
+	    mkdir -p "\$APP_INSTALL_DIR"
+
+	    # Extract serverName from config.json
+	    local SERVER_NAME
+	    SERVER_NAME=\$(jq -r '.serverName // empty' "\$CONFIG_PATH")
+
+	    # Handle missing server name
+	    if [ -z "\$SERVER_NAME" ] || [ "\$SERVER_NAME" = "null" ]; then
+		echo "⚠️ serverName not found in \$CONFIG_PATH"
+		return 0
+	    fi
+
+	    # Determine BASE_URL
+	    local BASE_URL
+	    if [[ "\$SERVER_NAME" =~ ^(localhost|127\.0\.0\.1)\$ ]]; then
+		BASE_URL="http://\$SERVER_NAME:3000"
+	    elif [[ "\$SERVER_NAME" =~ ^https?:// ]]; then
+		BASE_URL="\$SERVER_NAME"
+	    else
+		BASE_URL="https://\$SERVER_NAME"
+	    fi
+
+	    # Remove existing BASE_URL/NEXT_PUBLIC_BASE_URL lines if exists
+	    if [ -f "\$ENV_FILE" ]; then
+		grep -v "^BASE_URL=" "\$ENV_FILE" | grep -v "^NEXT_PUBLIC_BASE_URL=" > "\${ENV_FILE}.tmp" || true
+	    else
+		touch "\${ENV_FILE}.tmp"
+	    fi
+
+	    # Write new BASE_URL and NEXT_PUBLIC_BASE_URL
+	    echo "BASE_URL=\$BASE_URL" >> "\${ENV_FILE}.tmp"
+	    echo "NEXT_PUBLIC_BASE_URL=\$BASE_URL" >> "\${ENV_FILE}.tmp"
+	    mv "\${ENV_FILE}.tmp" "\$ENV_FILE"
+
+	    echo "✅ BASE_URL and NEXT_PUBLIC_BASE_URL updated in \$ENV_FILE (\$BASE_URL)"
 	}
 
 	# ------------------------------------------------
@@ -2390,6 +2418,9 @@ INNEREOF
 	    # Step 3: Save domain and email to config
 	    save_domain_to_config
 
+	    # Step 3.1: Write BASE_URL values to .env
+	    write_env_server_details
+
 	    # Step 4: Check DNS resolution
 	    check_dns_resolution
 
@@ -2550,6 +2581,9 @@ check_dep tar
 check_dep shasum
 check_pm2
 
+# Initialize BETA mode from config.json (with command line/env override)
+init_beta_mode "$@"
+
 case "${1:-}" in
     --install)
         install_all "${2:-}"
@@ -2575,6 +2609,12 @@ case "${1:-}" in
         ;;
     --update-license)
         update_license "${2:-}"
+        ;;
+    --beta-on)
+        set_beta_config "true"
+        ;;
+    --beta-off)
+        set_beta_config "false"
         ;;
     --help)
         echo "Usage:"
@@ -2603,6 +2643,12 @@ case "${1:-}" in
         echo
         echo "  --register [email]           Register a new license key"
         echo "                                Example: $0 --register user@example.com"
+        echo
+        echo "  --beta-on                     Set beta mode to true in config.json"
+        echo "                                Future updates will use the beta repository"
+        echo
+        echo "  --beta-off                    Set beta mode to false in config.json"
+        echo "                                Future updates will use the production repository"
         echo
         echo "  --help                        Show this help message and exit"
         echo
