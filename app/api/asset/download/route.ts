@@ -2,9 +2,10 @@ import { NextResponse } from "next/server";
 import { connectToDatabase } from "@/lib/db";
 import { validateLicense } from "@/lib/license";
 import {
-  GITHUB_API_URL,
   GITHUB_PAT,
-  GITHUB_REPO,
+  getGithubApiUrl,
+  getGithubRepo,
+  isBetaMode,
 } from "@/app/configs/github.config";
 
 type GithubAsset = {
@@ -27,6 +28,21 @@ export async function GET(req: Request) {
     const licenseKey = searchParams.get("licenseKey");
     const machineCode = searchParams.get("machineCode");
     const installedVersion = searchParams.get("installedVersion") || searchParams.get("version");
+    const beta = isBetaMode(searchParams);
+    const GITHUB_API_URL = getGithubApiUrl(beta);
+    const GITHUB_REPO = getGithubRepo(beta);
+    
+    // Check if beta mode is requested but not configured
+    if (beta && !GITHUB_API_URL) {
+      return NextResponse.json(
+        {
+          status: false,
+          error: "Beta mode requested but GITHUB_REPO_BETA is not configured",
+          message: "Please set GITHUB_REPO_BETA environment variable to enable beta releases"
+        },
+        { status: 400 }
+      );
+    }
 
     // Validate required parameters
     if (!licenseKey || !machineCode) {
@@ -44,9 +60,9 @@ export async function GET(req: Request) {
     const validationResult = await validateLicense(
       licenseKey,
       machineCode,
-      installedVersion || undefined
+      installedVersion || undefined,
+      beta || false
     );
-    console.log("validationResult", validationResult);
     if (!validationResult.valid) {
       return NextResponse.json(
         {
@@ -98,7 +114,6 @@ export async function GET(req: Request) {
           const contentType =
             assetResponse.headers.get("content-type") || "application/octet-stream";
           const contentLength = assetResponse.headers.get("content-length");
-          console.log("contentType", contentType , "assetResponse", assetResponse);
           
           // Stream the file back to the client instead of loading into memory
           return new NextResponse(assetResponse.body, {
@@ -117,6 +132,13 @@ export async function GET(req: Request) {
     }
 
     // Fetch releases from GitHub
+    if (!GITHUB_API_URL) {
+      return NextResponse.json(
+        { status: false, error: "Failed to determine GitHub API URL" },
+        { status: 500 }
+      );
+    }
+
     const githubHeaders: Record<string, string> = {
       Accept: "application/vnd.github.v3+json",
       "User-Agent": "License-Admin-App",
@@ -201,7 +223,6 @@ export async function GET(req: Request) {
 
     // Construct the GitHub API asset download URL
     const assetDownloadUrl = `https://api.github.com/repos/${GITHUB_REPO}/releases/assets/${asset.id}`;
-    console.log("assetDownloadUrl", assetDownloadUrl);
     // Fetch the asset from GitHub API
     const downloadHeaders: Record<string, string> = {
       Accept: "application/octet-stream",
@@ -215,7 +236,6 @@ export async function GET(req: Request) {
       headers: downloadHeaders,
       redirect: "follow", // Follow redirects
     });
-    console.log("assetResponse", assetResponse);
     if (!assetResponse.ok) {
       return NextResponse.json(
         { status: false, error: "Failed to fetch asset from GitHub" },
@@ -235,7 +255,6 @@ export async function GET(req: Request) {
       }
     }
 
-    console.log("filename", filename);
     // Get the content type
     const contentType =
       assetResponse.headers.get("content-type") || "application/octet-stream";
@@ -252,7 +271,6 @@ export async function GET(req: Request) {
     });
   } catch (error: unknown) {
     console.error("Error downloading asset:", error);
-    console.log("error", error);
     return NextResponse.json(
       {
         status: false,

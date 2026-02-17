@@ -2,7 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { connectToDatabase } from "@/lib/db";
 import { validateLicense } from "@/lib/license";
 import { licenseValidateSchema } from "@/lib/validators";
-import { checkRateLimit, getClientIP } from "@/lib/ratelimit";
+import { checkRateLimit } from "@/lib/ratelimit";
+import { isBetaMode } from "@/app/configs/github.config";
 
 // Rate limit configuration
 const RATE_LIMIT_CONFIG = {
@@ -13,9 +14,13 @@ const RATE_LIMIT_CONFIG = {
 // POST: Validate a license
 export async function POST(req: NextRequest) {
   try {
-    // Get client IP address
-    const clientIP = await getClientIP();
-
+    // Get client IP address from request headers
+    const forwardedFor = req.headers.get("x-forwarded-for");
+    const realIP = req.headers.get("x-real-ip");
+    const clientIP = forwardedFor?.split(",")[0].trim() || realIP || req.headers.get("cf-connecting-ip") || "unknown";
+    
+    const { searchParams } = new URL(req.url);
+    const beta = isBetaMode(searchParams);
     // Check rate limit
     const rateLimitResult = checkRateLimit(clientIP, RATE_LIMIT_CONFIG);
 
@@ -61,9 +66,9 @@ export async function POST(req: NextRequest) {
     const validationResult2 = await validateLicense(
       licenseKey,
       machineCode,
-      installedVersion
+      installedVersion,
+      beta || false
     );
-    console.log("validationResult2", validationResult2);
     if (!validationResult2.valid) {
       return NextResponse.json(
         {

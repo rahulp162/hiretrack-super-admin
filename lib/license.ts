@@ -3,7 +3,7 @@ import License from "@/app/models/license";
 import Client from "@/app/models/client";
 import ValidationHistory from "@/app/models/validationHistory";
 import { connectToDatabase } from "./db";
-import { GITHUB_API_URL, GITHUB_PAT } from "@/app/configs/github.config";
+import { getGithubApiUrl, GITHUB_PAT } from "@/app/configs/github.config";
 
 // Generate a unique license key
 export function generateLicenseKey(email: string, machineCode: string): string {
@@ -69,7 +69,8 @@ export function verifyLicenseKey(
 export async function validateLicense(
   licenseKey: string,
   machineCode: string,
-  installedVersion?: string
+  installedVersion?: string,
+  beta?: boolean
 ): Promise<{
   valid: boolean;
   asset?: string;
@@ -85,9 +86,13 @@ export async function validateLicense(
     valid: false,
     message: "",
   };
-
+  
   try {
-   
+    const GITHUB_API_URL = getGithubApiUrl(beta || false);
+    if (!GITHUB_API_URL) {
+      validationResult = { valid: false, message: "Beta mode requested but GITHUB_REPO_BETA is not configured" };
+      return validationResult;
+    }
     await connectToDatabase();
     
     // Find the license in the database

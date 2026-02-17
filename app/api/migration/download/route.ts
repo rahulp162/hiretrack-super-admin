@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { GITHUB_API_URL, GITHUB_PAT } from "@/app/configs/github.config";
+import { GITHUB_PAT, getGithubApiUrl, isBetaMode } from "@/app/configs/github.config";
 
 type GithubAsset = {
   name: string;
@@ -58,6 +58,27 @@ export async function GET(req: Request) {
     const currentVersion = searchParams.get("currentVersion");
     const requiredVersion =
       searchParams.get("requiredVersion") || searchParams.get("upgradeVersion");
+    const beta = isBetaMode(searchParams);
+    const GITHUB_API_URL = getGithubApiUrl(beta);
+
+    // Check if beta mode is requested but not configured
+    if (beta && !GITHUB_API_URL) {
+      return NextResponse.json(
+        { 
+          status: false,
+          error: "Beta mode requested but GITHUB_REPO_BETA is not configured",
+          message: "Please set GITHUB_REPO_BETA environment variable to enable beta releases"
+        },
+        { status: 400 }
+      );
+    }
+
+    if (!GITHUB_API_URL) {
+      return NextResponse.json(
+        { status: false, error: "Failed to determine GitHub API URL" },
+        { status: 500 }
+      );
+    }
 
     const headers: Record<string, string> = {
       Accept: "application/vnd.github.v3+json",

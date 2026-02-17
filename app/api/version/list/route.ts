@@ -1,4 +1,4 @@
-import { GITHUB_API_URL, GITHUB_PAT } from "@/app/configs/github.config";
+import { GITHUB_PAT, getGithubApiUrl, isBetaMode } from "@/app/configs/github.config";
 import { NextResponse } from "next/server";
 
 // Utility function to compare semantic versions
@@ -40,6 +40,32 @@ export async function GET(req: Request) {
     const { searchParams } = new URL(req.url);
     const currentVersion = searchParams.get("currentVersion");
     const upgradeVersion = searchParams.get("upgradeVersion");
+    const beta = isBetaMode(searchParams);
+    const GITHUB_API_URL = getGithubApiUrl(beta);
+
+    // Debug logging
+    console.log("🔍 Version List API - Beta mode:", beta);
+    console.log("🔍 Beta param from URL:", searchParams.get("beta"), searchParams.get("BETA"));
+    console.log("🔍 GitHub API URL:", GITHUB_API_URL);
+    console.log("🔍 GITHUB_REPO_BETA:", process.env.GITHUB_REPO_BETA);
+
+    // Check if beta mode is requested but not configured
+    if (beta && !GITHUB_API_URL) {
+      return NextResponse.json(
+        { 
+          error: "Beta mode requested but GITHUB_REPO_BETA is not configured",
+          message: "Please set GITHUB_REPO_BETA environment variable to enable beta releases"
+        },
+        { status: 400 }
+      );
+    }
+
+    if (!GITHUB_API_URL) {
+      return NextResponse.json(
+        { error: "Failed to determine GitHub API URL" },
+        { status: 500 }
+      );
+    }
 
     const githubResponse = await fetch(
       GITHUB_API_URL,
