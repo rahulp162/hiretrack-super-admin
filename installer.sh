@@ -329,9 +329,14 @@ set_beta_config() {
 # ------------------------------------------------
 # Dependency Installation
 # ------------------------------------------------
+# Normalize version for comparison: strip leading 'v' and trim (e.g. v20.19.5 or 20.19.5 -> 20.19.5)
+normalize_node_version() {
+    echo "$1" | sed 's/^v//' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+}
+
 install_node() {
     local APP_DIR="$1"
-    local NODE_VERSION NODE_MAJOR_VERSION NEEDS_INSTALL=false NEEDS_REMOVE=false
+    local NODE_VERSION NODE_MAJOR_VERSION REQUIRED_NORMALIZED NEEDS_INSTALL=false NEEDS_REMOVE=false
 
     if [ -n "$APP_DIR" ] && [ -f "$APP_DIR/.env" ]; then
         NODE_VERSION=$(grep -E '^NODE_VERSION=' "$APP_DIR/.env" | cut -d '=' -f2)
@@ -342,25 +347,26 @@ install_node() {
         return 0
     fi
 
-    NODE_MAJOR_VERSION=$(echo "$NODE_VERSION" | sed 's/v\([0-9]*\).*/\1/')
+    REQUIRED_NORMALIZED=$(normalize_node_version "$NODE_VERSION")
+    NODE_MAJOR_VERSION=$(echo "$REQUIRED_NORMALIZED" | sed -n 's/^\([0-9]*\).*/\1/p')
     if [ -z "$NODE_MAJOR_VERSION" ]; then
-        echo "⚠️ Could not determine Node.js major version from: $NODE_VERSION. Skipping installation."
+        echo "⚠️ Could not determine Node.js version from: $NODE_VERSION. Skipping installation."
         return 0
     fi
 
     if command -v node >/dev/null 2>&1; then
-        local CURRENT_VERSION
-        CURRENT_VERSION=$(node -v 2>/dev/null | sed 's/v\([0-9]*\).*/\1/')
-        if [ "$CURRENT_VERSION" = "$NODE_MAJOR_VERSION" ]; then
-            echo "✅ Node.js version $NODE_MAJOR_VERSION.x already installed (found $(node -v))."
+        local CURRENT_NORMALIZED
+        CURRENT_NORMALIZED=$(normalize_node_version "$(node -v 2>/dev/null)")
+        if [ "$CURRENT_NORMALIZED" = "$REQUIRED_NORMALIZED" ]; then
+            echo "✅ Node.js $REQUIRED_NORMALIZED already installed (found $(node -v))."
             return
         else
-            echo "⚠ Found Node.js v$CURRENT_VERSION, but v$NODE_MAJOR_VERSION.x required."
+            echo "⚠ Found Node.js $(node -v), but $REQUIRED_NORMALIZED required (from .env)."
             NEEDS_REMOVE=true
             NEEDS_INSTALL=true
         fi
     else
-        echo "⚠ Node.js not found."
+        echo "⚠ Node.js not found. Will install $REQUIRED_NORMALIZED (from .env)."
         NEEDS_INSTALL=true
     fi
 
@@ -394,46 +400,110 @@ install_node() {
     fi
 
     if [ "$NEEDS_INSTALL" = "true" ]; then
-        echo "📦 Installing Node.js $NODE_MAJOR_VERSION.x..."
-        local CODENAME
-        CODENAME=$(lsb_release -cs 2>/dev/null || echo "focal")
+        echo "📦 Installing Node.js $REQUIRED_NORMALIZED (exact version from .env)..."
+        local NODE_DIST_VER="v$REQUIRED_NORMALIZED"
+        local OS_TYPE ARCH NODE_TAR DIRNAME
+        OS_TYPE=$(uname -s | tr '[:upper:]' '[:lower:]')
+        ARCH=$(uname -m)
+        case "$ARCH" in
+            x86_64|amd64) ARCH="x64" ;;
+            aarch64|arm64) ARCH="arm64" ;;
+            *) echo "❌ Unsupported architecture: $ARCH"; exit 1 ;;
+        esac
+        case "$OS_TYPE" in
+            linux) DIRNAME="node-${NODE_DIST_VER}-linux-${ARCH}" ;;
+            darwin) DIRNAME="node-${NODE_DIST_VER}-darwin-${ARCH}" ;;
+            *) echo "❌ Unsupported OS: $OS_TYPE"; exit 1 ;;
+        esac
+        local NODE_INSTALL_ROOT="${NODE_INSTALL_ROOT:-/usr/local}"
+        local NODE_DIR="$NODE_INSTALL_ROOT/$DIRNAME"
+        NODE_TAR="/tmp/${DIRNAME}.tar.xz"
+        local NODE_URL="https://nodejs.org/dist/${NODE_DIST_VER}/${DIRNAME}.tar.xz"
 
-        curl -fsSL "https://deb.nodesource.com/setup_$NODE_MAJOR_VERSION.x" | sudo -E bash -
-        sudo apt-get update -y
-        sudo apt-get install -y nodejs || { echo "❌ Failed to install Node.js."; exit 1; }
+        if [ ! -d "$NODE_DIR" ] || ! "$NODE_DIR/bin/node" -v 2>/dev/null | grep -qF "$REQUIRED_NORMALIZED"; then
+            echo "   Downloading from $NODE_URL"
+            curl -fsSL -o "$NODE_TAR" "$NODE_URL" || { echo "❌ Failed to download Node.js $REQUIRED_NORMALIZED."; exit 1; }
+            sudo mkdir -p "$NODE_INSTALL_ROOT"
+            sudo rm -rf "$NODE_DIR"
+            tar -xJf "$NODE_TAR" -C "$NODE_INSTALL_ROOT" || { rm -f "$NODE_TAR"; echo "❌ Failed to extract Node.js."; exit 1; }
+            rm -f "$NODE_TAR"
+        fi
 
-        # Ensure correct binary
-        hash -r
-        export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
-
-        if ! command -v node >/dev/null 2>&1; then
-            echo "❌ Node.js not found in PATH after installation."
+        if [ ! -x "$NODE_DIR/bin/node" ]; then
+            echo "❌ Node.js binary not found at $NODE_DIR/bin/node"
             exit 1
         fi
 
-        local NODE_PATH
-        NODE_PATH=$(command -v node)
-        local NODE_VER
-        NODE_VER=$(node -v)
-        local NPM_VER
-        NPM_VER=$(npm -v 2>/dev/null || echo "missing")
+        # Prepend to PATH and persist so exec $SHELL -l gets the new node
+        export PATH="$NODE_DIR/bin:$PATH"
+        local PROFILE
+        for PROFILE in ~/.bashrc ~/.profile; do
+            if [ -f "$PROFILE" ] && ! grep -qF "$NODE_DIR/bin" "$PROFILE" 2>/dev/null; then
+                echo "export PATH=\"$NODE_DIR/bin:\$PATH\"" >> "$PROFILE"
+            fi
+        done
+        hash -r
 
+        local NODE_PATH NODE_VER NPM_VER
+        NODE_PATH=$(command -v node)
+        NODE_VER=$(node -v)
+        NPM_VER=$(npm -v 2>/dev/null || echo "missing")
         echo "✅ Node.js $NODE_VER and npm $NPM_VER installed successfully."
         echo "   Active binary: $NODE_PATH"
         echo "♻️ Reloading environment to apply Node.js changes..."
-        export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
         hash -r
         sleep 1
-        # Verify new node in PATH
         if command -v node >/dev/null 2>&1; then
             echo "✅ Node.js environment refreshed successfully (using $(node -v))"
         else
             echo "⚠️ Node.js not detected after reload. You may need to restart your terminal manually."
         fi
-
     fi
 }
 
+# Logout/exit user to restart terminal session (for fresh Node.js installation)
+logout_user() {
+    echo ""
+    echo "🔄 Node.js has been installed successfully."
+    echo "   Please logout and login again (or restart your terminal) to apply the changes,"
+    echo "   then run the installer again to continue."
+    echo ""
+    # Exit the script - user needs to logout/login manually to get the updated PATH
+    # The PATH has been added to ~/.bashrc/~/.profile, so after logout/login it will be available
+    exit 0
+}
+
+# Returns 0 if Node.js is not installed, 1 if installed
+is_node_installed() {
+    command -v node >/dev/null 2>&1
+}
+
+# Returns 0 if Node.js needs to be installed (missing or version mismatch), 1 otherwise.
+# Compares full version from extracted .env to installed node (e.g. 20.19.5 vs 20.19.5).
+need_node_install() {
+    local APP_DIR="$1"
+    local NODE_VERSION REQUIRED_NORMALIZED CURRENT_NORMALIZED
+
+    if [ -z "$APP_DIR" ] || [ ! -f "$APP_DIR/.env" ]; then
+        return 1
+    fi
+    NODE_VERSION=$(grep -E '^NODE_VERSION=' "$APP_DIR/.env" 2>/dev/null | cut -d '=' -f2)
+    if [ -z "$NODE_VERSION" ]; then
+        return 1
+    fi
+    REQUIRED_NORMALIZED=$(normalize_node_version "$NODE_VERSION")
+    if [ -z "$REQUIRED_NORMALIZED" ] || ! echo "$REQUIRED_NORMALIZED" | grep -qE '^[0-9]+\.[0-9]'; then
+        return 1
+    fi
+    if ! is_node_installed; then
+        return 0
+    fi
+    CURRENT_NORMALIZED=$(normalize_node_version "$(node -v 2>/dev/null)")
+    if [ "$CURRENT_NORMALIZED" = "$REQUIRED_NORMALIZED" ]; then
+        return 1
+    fi
+    return 0
+}
 
 check_pm2() {
     # Check if APP_INSTALL_DIR exists and contains required files
@@ -880,6 +950,31 @@ rollback() {
     [ -n "$DB_URL" ] && write_env_mongo_url "$APP_INSTALL_DIR" "$DB_URL"
 
     [ "$DB_CHOICE" = "local" ] && install_and_start_mongodb
+
+    # Compare required Node version (from extracted app .env) with current system:
+    # - If Node.js is NOT installed → install → logout user (restart terminal)
+    # - If Node.js version mismatch → update → continue (no logout needed)
+    if need_node_install "$APP_INSTALL_DIR"; then
+        if ! is_node_installed; then
+            # Node.js is not installed - install it and logout user
+            echo "⚠️  Node.js is not installed. Installing Node.js..." | tee -a "$ROLLBACK_LOG_FILE"
+            install_node "$APP_INSTALL_DIR" || {
+                echo "❌ Node install failed during rollback." | tee -a "$ROLLBACK_LOG_FILE"
+                return 1
+            }
+            echo "✅ Node.js installed. Logging out to restart terminal session..." | tee -a "$ROLLBACK_LOG_FILE"
+            logout_user
+        else
+            # Node.js is installed but wrong version - update it and continue
+            echo "⚠️  Node.js version mismatch. Updating Node.js..." | tee -a "$ROLLBACK_LOG_FILE"
+            install_node "$APP_INSTALL_DIR" || {
+                echo "❌ Node update failed during rollback." | tee -a "$ROLLBACK_LOG_FILE"
+                return 1
+            }
+            echo "✅ Node.js updated. Continuing with rollback..." | tee -a "$ROLLBACK_LOG_FILE"
+        fi
+    fi
+    # Ensure Node.js is available (in case it was already correct version)
     install_node "$APP_INSTALL_DIR" || {
         echo "❌ Node install failed during rollback." | tee -a "$ROLLBACK_LOG_FILE"
         return 1
@@ -1153,13 +1248,42 @@ check_update_and_install() {
     [ -n "$DB_URL" ] && write_env_mongo_url "$APP_INSTALL_DIR" "$DB_URL"
 
     [ "$DB_CHOICE" = "local" ] && install_and_start_mongodb
+
+    # Compare required Node version (from extracted app .env) with current system:
+    # - If Node.js is NOT installed → install → logout user (restart terminal)
+    # - If Node.js version mismatch → update → continue (no logout needed)
+    if need_node_install "$APP_INSTALL_DIR"; then
+        if ! is_node_installed; then
+            # Node.js is not installed - install it and logout user
+            log "⚠️  Node.js is not installed. Installing Node.js..."
+            install_node "$APP_INSTALL_DIR" || {
+                log "❌ Node install failed."
+                rm -f "$TMP_FILE" >/dev/null 2>&1 || true
+                rollback
+                return 1
+            }
+            log "✅ Node.js installed. Logging out to restart terminal session..."
+            logout_user
+        else
+            # Node.js is installed but wrong version - update it and continue
+            log "⚠️  Node.js version mismatch. Updating Node.js..."
+            install_node "$APP_INSTALL_DIR" || {
+                log "❌ Node update failed."
+                rm -f "$TMP_FILE" >/dev/null 2>&1 || true
+                rollback
+                return 1
+            }
+            log "✅ Node.js updated. Continuing with installation..."
+        fi
+    fi
+    # Ensure Node.js is available (in case it was already correct version)
     install_node "$APP_INSTALL_DIR" || {
         log "❌ Node install failed."
         rm -f "$TMP_FILE" >/dev/null 2>&1 || true
         rollback
         return 1
     }
-    
+
     log "✅ Using Node.js ($(node -v))"
     
     cd "$APP_INSTALL_DIR" || {
@@ -2368,11 +2492,11 @@ INNEREOF
 	    echo ""
 	    echo "You can register the first organization from the URL below:"
 	    echo ""
-	    echo "   ╔═══════════════════════════════════════════════════════════╗"
-	    echo "   ║                                                           ║"
-	    echo "   ║   https://\$DOMAIN_NAME/register/org                      ║"
-	    echo "   ║                                                           ║"
-	    echo "   ╚═══════════════════════════════════════════════════════════╝"
+	    echo "   ╔══════════════════════════════════════════════════════════╗"
+	    echo "   ║                                                          ║"
+	    echo "   ║   https://\$DOMAIN_NAME/register/org                     ║"
+	    echo "   ║                                                          ║"
+	    echo "   ╚══════════════════════════════════════════════════════════╝"
 	    echo ""
 	    echo "════════════════════════════════════════════════"
 	}
