@@ -3,7 +3,8 @@ import License from "@/app/models/license";
 import Client from "@/app/models/client";
 import ValidationHistory from "@/app/models/validationHistory";
 import { connectToDatabase } from "./db";
-import { getGithubApiUrl, GITHUB_PAT } from "@/app/configs/github.config";
+import type { GithubChannel } from "@/app/configs/github.config";
+import { getChannelLabel, getGithubApiUrl, GITHUB_PAT } from "@/app/configs/github.config";
 
 // Generate a unique license key
 export function generateLicenseKey(email: string, machineCode: string): string {
@@ -70,7 +71,7 @@ export async function validateLicense(
   licenseKey: string,
   machineCode: string,
   installedVersion?: string,
-  beta?: boolean
+  channel: GithubChannel = "production"
 ): Promise<{
   valid: boolean;
   asset?: string;
@@ -86,11 +87,14 @@ export async function validateLicense(
     valid: false,
     message: "",
   };
-  
+
   try {
-    const GITHUB_API_URL = getGithubApiUrl(beta || false);
+    const GITHUB_API_URL = getGithubApiUrl(channel);
     if (!GITHUB_API_URL) {
-      validationResult = { valid: false, message: "Beta mode requested but GITHUB_REPO_BETA is not configured" };
+      validationResult = {
+        valid: false,
+        message: `${getChannelLabel(channel)} mode requested but the corresponding GitHub repo is not configured`,
+      };
       return validationResult;
     }
     await connectToDatabase();

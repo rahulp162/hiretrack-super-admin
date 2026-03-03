@@ -3,7 +3,7 @@ import { connectToDatabase } from "@/lib/db";
 import { validateLicense } from "@/lib/license";
 import { licenseValidateSchema } from "@/lib/validators";
 import { checkRateLimit } from "@/lib/ratelimit";
-import { isBetaMode } from "@/app/configs/github.config";
+import { getChannel } from "@/app/configs/github.config";
 
 // Rate limit configuration
 const RATE_LIMIT_CONFIG = {
@@ -20,7 +20,7 @@ export async function POST(req: NextRequest) {
     const clientIP = forwardedFor?.split(",")[0].trim() || realIP || req.headers.get("cf-connecting-ip") || "unknown";
     
     const { searchParams } = new URL(req.url);
-    const beta = isBetaMode(searchParams);
+    const channel = getChannel(searchParams);
     // Check rate limit
     const rateLimitResult = checkRateLimit(clientIP, RATE_LIMIT_CONFIG);
 
@@ -67,7 +67,7 @@ export async function POST(req: NextRequest) {
       licenseKey,
       machineCode,
       installedVersion,
-      beta || false
+      channel
     );
     if (!validationResult2.valid) {
       return NextResponse.json(

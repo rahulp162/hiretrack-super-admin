@@ -3,9 +3,11 @@ import { connectToDatabase } from "@/lib/db";
 import { validateLicense } from "@/lib/license";
 import {
   GITHUB_PAT,
+  getChannel,
+  getChannelEnvVar,
+  getChannelLabel,
   getGithubApiUrl,
   getGithubRepo,
-  isBetaMode,
 } from "@/app/configs/github.config";
 
 type GithubAsset = {
@@ -28,17 +30,17 @@ export async function GET(req: Request) {
     const licenseKey = searchParams.get("licenseKey");
     const machineCode = searchParams.get("machineCode");
     const installedVersion = searchParams.get("installedVersion") || searchParams.get("version");
-    const beta = isBetaMode(searchParams);
-    const GITHUB_API_URL = getGithubApiUrl(beta);
-    const GITHUB_REPO = getGithubRepo(beta);
-    
-    // Check if beta mode is requested but not configured
-    if (beta && !GITHUB_API_URL) {
+    const channel = getChannel(searchParams);
+    const GITHUB_API_URL = getGithubApiUrl(channel);
+    const GITHUB_REPO = getGithubRepo(channel);
+
+    // Check if non-production channel is requested but not configured
+    if (channel !== "production" && !GITHUB_API_URL) {
       return NextResponse.json(
         {
           status: false,
-          error: "Beta mode requested but GITHUB_REPO_BETA is not configured",
-          message: "Please set GITHUB_REPO_BETA environment variable to enable beta releases"
+          error: `${getChannelLabel(channel)} mode requested but ${getChannelEnvVar(channel)} is not configured`,
+          message: `Please set ${getChannelEnvVar(channel)} environment variable to enable ${getChannelLabel(channel).toLowerCase()} releases`,
         },
         { status: 400 }
       );
@@ -61,7 +63,7 @@ export async function GET(req: Request) {
       licenseKey,
       machineCode,
       installedVersion || undefined,
-      beta || false
+      channel
     );
     if (!validationResult.valid) {
       return NextResponse.json(

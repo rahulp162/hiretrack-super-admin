@@ -1,4 +1,10 @@
-import { GITHUB_PAT, getGithubApiUrl, isBetaMode } from "@/app/configs/github.config";
+import {
+  GITHUB_PAT,
+  getChannel,
+  getChannelEnvVar,
+  getChannelLabel,
+  getGithubApiUrl,
+} from "@/app/configs/github.config";
 import { NextResponse } from "next/server";
 
 // Utility function to compare semantic versions
@@ -40,17 +46,15 @@ export async function GET(req: Request) {
     const { searchParams } = new URL(req.url);
     const currentVersion = searchParams.get("currentVersion");
     const upgradeVersion = searchParams.get("upgradeVersion");
-    const beta = isBetaMode(searchParams);
-    const GITHUB_API_URL = getGithubApiUrl(beta);
+    const channel = getChannel(searchParams);
+    const GITHUB_API_URL = getGithubApiUrl(channel);
 
-
-
-    // Check if beta mode is requested but not configured
-    if (beta && !GITHUB_API_URL) {
+    // Check if non-production channel is requested but not configured
+    if (channel !== "production" && !GITHUB_API_URL) {
       return NextResponse.json(
-        { 
-          error: "Beta mode requested but GITHUB_REPO_BETA is not configured",
-          message: "Please set GITHUB_REPO_BETA environment variable to enable beta releases"
+        {
+          error: `${getChannelLabel(channel)} mode requested but ${getChannelEnvVar(channel)} is not configured`,
+          message: `Please set ${getChannelEnvVar(channel)} environment variable to enable ${getChannelLabel(channel).toLowerCase()} releases`,
         },
         { status: 400 }
       );
