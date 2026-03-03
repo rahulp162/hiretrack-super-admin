@@ -25,95 +25,84 @@ ASSET_MIGRATION_API="https://admin.hiretrack.in/api/migration/download"
 MONGODB_VERSION="${MONGODB_VERSION:-7.0}"
 # NODE_VERSION_DEFAULT=20
 
-# Initialize BETA variable to avoid unbound variable errors
-# This will be properly set by init_beta_mode() later, but we need a default here
-BETA="${BETA:-false}"
+# Channel: production (default), beta, or staging. Set by init_channel_mode().
+CHANNEL="${CHANNEL:-production}"
 
-# Helper function to append BETA=true to query parameters when in beta mode
-append_beta_param() {
+# Helper function to append channel query param (BETA=true or STAGING=true) when not production
+append_channel_param() {
     local url="$1"
-    local beta_value="${BETA:-false}"
-    
-    # If BETA is not set, check config.json as fallback
-    if [ "$beta_value" = "false" ] && [ -f "$CONFIG_PATH" ]; then
-        local config_beta
-        config_beta=$(jq -r '.beta // false' "$CONFIG_PATH" 2>/dev/null || echo "false")
-        # Normalize config value
-        if [ "$config_beta" = "true" ] || [ "$config_beta" = "1" ] || [ "$config_beta" = "yes" ]; then
-            beta_value="true"
-        fi
-    fi
-    
-    # Append BETA=true if beta mode is enabled
-    if [ "$beta_value" = "true" ]; then
+    local ch="${CHANNEL:-production}"
+    if [ "$ch" = "beta" ]; then
         if [[ "$url" == *"?"* ]]; then
             echo "${url}&BETA=true"
         else
             echo "${url}?BETA=true"
+        fi
+    elif [ "$ch" = "staging" ]; then
+        if [[ "$url" == *"?"* ]]; then
+            echo "${url}&STAGING=true"
+        else
+            echo "${url}?STAGING=true"
         fi
     else
         echo "$url"
     fi
 }
 
-# Function to initialize and manage BETA mode from config.json
-init_beta_mode() {
+# Function to initialize and manage channel (production / beta / staging) from config.json
+init_channel_mode() {
     # Ensure config.json exists
     if [ ! -f "$CONFIG_PATH" ]; then
         mkdir -p "$(dirname "$CONFIG_PATH")"
-        echo '{"autoUpdate": true, "installedVersion": "none", "beta": false}' > "$CONFIG_PATH"
+        echo '{"autoUpdate": true, "installedVersion": "none", "channel": "production"}' > "$CONFIG_PATH"
     fi
-    
-    # Read BETA from config.json first (if exists)
-    local CONFIG_BETA
-    CONFIG_BETA=$(jq -r '.beta // false' "$CONFIG_PATH" 2>/dev/null || echo "false")
-    
-    # Check for command line flag override
-    local BETA_FLAG="false"
+
+    # Read channel from config; fallback to "beta" if old "beta": true exists for backward compat
+    local CONFIG_CHANNEL
+    CONFIG_CHANNEL=$(jq -r '.channel // empty' "$CONFIG_PATH" 2>/dev/null || echo "")
+    if [ -z "$CONFIG_CHANNEL" ] || [ "$CONFIG_CHANNEL" = "null" ]; then
+        local CONFIG_BETA
+        CONFIG_BETA=$(jq -r '.beta // false' "$CONFIG_PATH" 2>/dev/null || echo "false")
+        if [ "$CONFIG_BETA" = "true" ] || [ "$CONFIG_BETA" = "1" ] || [ "$CONFIG_BETA" = "yes" ]; then
+            CONFIG_CHANNEL="beta"
+        else
+            CONFIG_CHANNEL="production"
+        fi
+    fi
+
+    # Check for command line flag override (--beta or --staging)
+    local CHANNEL_FLAG=""
     for arg in "$@"; do
         if [ "$arg" = "--beta" ] || [ "$arg" = "-beta" ]; then
-            BETA_FLAG="true"
+            CHANNEL_FLAG="beta"
+            break
+        fi
+        if [ "$arg" = "--staging" ] || [ "$arg" = "-staging" ]; then
+            CHANNEL_FLAG="staging"
             break
         fi
     done
-    
-    # Priority: command line flag > config.json
-    if [ "$BETA_FLAG" = "true" ]; then
-        # Command line flag set - use true and save to config
-        BETA="true"
-    else
-        # Read from config.json
-        BETA="$CONFIG_BETA"
-    fi
-    
-    # Normalize BETA value to "true" or "false"
-    if [ "$BETA" = "true" ] || [ "$BETA" = "1" ] || [ "$BETA" = "yes" ]; then
-        BETA="true"
-    else
-        BETA="false"
-    fi
-    
-    # Save BETA to config.json if command line flag was used
-    if [ "$BETA_FLAG" = "true" ]; then
-        local CURRENT_CONFIG_BETA
-        CURRENT_CONFIG_BETA=$(jq -r '.beta // false' "$CONFIG_PATH" 2>/dev/null || echo "false")
-        # Normalize current config beta for comparison
-        if [ "$CURRENT_CONFIG_BETA" = "true" ] || [ "$CURRENT_CONFIG_BETA" = "1" ] || [ "$CURRENT_CONFIG_BETA" = "yes" ]; then
-            CURRENT_CONFIG_BETA="true"
-        else
-            CURRENT_CONFIG_BETA="false"
+
+    if [ -n "$CHANNEL_FLAG" ]; then
+        CHANNEL="$CHANNEL_FLAG"
+        if [ "$CONFIG_CHANNEL" != "$CHANNEL" ]; then
+            write_config "channel" "$CHANNEL"
+            echo "💾 Channel saved to config.json: $CHANNEL" >&2
         fi
-        
-        # Only save if different from current config
-        if [ "$CURRENT_CONFIG_BETA" != "$BETA" ]; then
-            write_config "beta" "$BETA"
-            echo "💾 BETA mode saved to config.json: $BETA" >&2
-        fi
+    else
+        CHANNEL="$CONFIG_CHANNEL"
     fi
-    
-    # Display beta mode status
-    if [ "$BETA" = "true" ]; then
-        echo "🔷 BETA MODE ENABLED - Using development/test repository" >&2
+
+    # Normalize
+    case "$CHANNEL" in
+        beta|staging|production) ;;
+        *) CHANNEL="production" ;;
+    esac
+
+    if [ "$CHANNEL" = "beta" ]; then
+        echo "🔷 BETA MODE ENABLED - Using beta repository" >&2
+    elif [ "$CHANNEL" = "staging" ]; then
+        echo "🔷 STAGING MODE ENABLED - Using staging repository" >&2
     fi
 }
 
@@ -288,41 +277,44 @@ write_config() {
     jq --arg k "$KEY" --arg v "$VALUE" '.[$k]=$v' "$CONFIG_PATH" > "${CONFIG_PATH}.tmp" && mv "${CONFIG_PATH}.tmp" "$CONFIG_PATH"
 }
 
-# Set beta mode in config.json to true or false (standalone toggle)
-set_beta_config() {
-    local VALUE="$1"
+# Set channel in config.json (production | beta | staging)
+set_channel_config() {
+    local CH="$1"
     if [ ! -f "$CONFIG_PATH" ]; then
         mkdir -p "$(dirname "$CONFIG_PATH")"
-        echo '{"autoUpdate": true, "installedVersion": "none", "beta": false}' > "$CONFIG_PATH"
+        echo '{"autoUpdate": true, "installedVersion": "none", "channel": "production"}' > "$CONFIG_PATH"
     fi
-    write_config "beta" "$VALUE"
-    if [ "$VALUE" = "true" ]; then
-        echo "✅ Beta mode enabled in config.json ($CONFIG_PATH)"
-        echo "   Future updates will use the beta repository."
-    else
-        echo "✅ Beta mode disabled in config.json ($CONFIG_PATH)"
-        echo "   Future updates will use the production repository."
-    fi
-    
-    # Check if license.json exists before asking about upgrade
+    write_config "channel" "$CH"
+    case "$CH" in
+        beta)   echo "✅ Beta channel set in config.json ($CONFIG_PATH). Future updates use the beta repository." ;;
+        staging) echo "✅ Staging channel set in config.json ($CONFIG_PATH). Future updates use the staging repository." ;;
+        *)      echo "✅ Production channel set in config.json ($CONFIG_PATH). Future updates use the production repository." ;;
+    esac
+
     if [ ! -f "$LICENSE_PATH" ] || ! jq -e '.licenseKey' "$LICENSE_PATH" >/dev/null 2>&1; then
-        echo "✅ Beta mode configuration saved. Exiting."
         echo "   Note: License not found. Please register a license first before upgrading."
         exit 0
     fi
-    
-    # Ask user if they want to upgrade the app (only if license exists)
     echo ""
     read -p "Do you want to upgrade the app now? (y/n): " UPGRADE_CHOICE
     UPGRADE_CHOICE=$(echo "$UPGRADE_CHOICE" | tr '[:upper:]' '[:lower:]')
-    
     if [ "$UPGRADE_CHOICE" = "y" ] || [ "$UPGRADE_CHOICE" = "yes" ]; then
         echo ""
         echo "🚀 Starting app upgrade..."
         check_update_and_install "manually"
     else
-        echo "✅ Beta mode configuration saved. Exiting."
+        echo "✅ Channel configuration saved. Exiting."
         exit 0
+    fi
+}
+
+# Legacy: set beta on/off (maps to channel beta or production)
+set_beta_config() {
+    local VALUE="$1"
+    if [ "$VALUE" = "true" ] || [ "$VALUE" = "1" ] || [ "$VALUE" = "yes" ]; then
+        set_channel_config "beta"
+    else
+        set_channel_config "production"
     fi
 }
 
@@ -623,12 +615,18 @@ install_and_start_mongodb() {
 create_default_config() {
     local PASSED_EMAIL="${1:-}"
     if [ ! -f "$CONFIG_PATH" ]; then
-        echo '{"autoUpdate": true, "installedVersion": "none", "beta": false}' > "$CONFIG_PATH"
+        echo '{"autoUpdate": true, "installedVersion": "none", "channel": "production"}' > "$CONFIG_PATH"
         echo "✅ Default config created at $CONFIG_PATH"
     else
-        # Ensure beta field exists in existing config
-        if ! jq -e '.beta' "$CONFIG_PATH" >/dev/null 2>&1; then
-            write_config "beta" "false"
+        # Ensure channel exists; migrate old beta-only config
+        if ! jq -e '.channel' "$CONFIG_PATH" >/dev/null 2>&1; then
+            local BETA_VAL
+            BETA_VAL=$(jq -r '.beta // false' "$CONFIG_PATH" 2>/dev/null || echo "false")
+            if [ "$BETA_VAL" = "true" ] || [ "$BETA_VAL" = "1" ] || [ "$BETA_VAL" = "yes" ]; then
+                write_config "channel" "beta"
+            else
+                write_config "channel" "production"
+            fi
         fi
     fi
 
@@ -799,7 +797,7 @@ validate_license_and_get_asset() {
     # Capture HTTP code from stdout (last line), progress shows on stderr
     echo "📥 Downloading asset with license validation..." >&2
     local ASSET_URL="${ASSET_DOWNLOAD_API}?${QUERY_PARAMS}"
-    ASSET_URL=$(append_beta_param "$ASSET_URL")
+    ASSET_URL=$(append_channel_param "$ASSET_URL")
     HTTP_CODE=$(curl -w "\n%{http_code}" -o "$TMP_FILE" \
         --progress-bar \
         "$ASSET_URL" 2>&1 | grep -E '^[0-9]{3}$' | tail -n1 || echo "000")
@@ -856,7 +854,7 @@ validate_license_and_get_asset() {
 # Version Management
 # ------------------------------------------------
 check_latest_version() {
-    local VERSION_URL=$(append_beta_param "$LATEST_VERSION_API")
+    local VERSION_URL=$(append_channel_param "$LATEST_VERSION_API")
     local RESPONSE=$(curl -s "$VERSION_URL")
     if [ -z "$RESPONSE" ] || ! echo "$RESPONSE" | jq . >/dev/null 2>&1; then
         echo "❌ Failed to get latest version info."
@@ -1383,7 +1381,7 @@ run_migrations() {
 
     # Call migration download API with currentVersion and requiredVersion (target)
     local MIG_URL="${ASSET_MIGRATION_API}?currentVersion=$CURRENT_VERSION&requiredVersion=$TARGET_VERSION"
-    MIG_URL=$(append_beta_param "$MIG_URL")
+    MIG_URL=$(append_channel_param "$MIG_URL")
     local MIG_RESPONSE
     MIG_RESPONSE="$(curl -s "$MIG_URL" 2>/dev/null || true)"
     echo "MIG_RESPONSE: $MIG_RESPONSE" | tee -a "$LOG_DIR/migration.log"
@@ -2699,11 +2697,10 @@ show_help() {
     echo "  --register [email]           Register a new license key"
     echo "                                Example: $0 --register user@example.com"
     echo
-    echo "  --beta-on                     Set beta mode to true in config.json"
-    echo "                                Future updates will use the beta repository"
-    echo
-    echo "  --beta-off                    Set beta mode to false in config.json"
-    echo "                                Future updates will use the production repository"
+    echo "  --beta-on                     Use beta repository (same as --channel beta)"
+    echo "  --beta-off                    Use production repository (same as --channel production)"
+    echo "  --staging-on                  Use staging repository"
+    echo "  --staging-off                 Use production repository"
     echo
     echo "  --help                        Show this help message and exit"
     echo
@@ -2724,8 +2721,8 @@ check_dep tar
 check_dep shasum
 check_pm2
 
-# Initialize BETA mode from config.json (with command line/env override)
-init_beta_mode "$@"
+# Initialize channel (production / beta / staging) from config.json (with command line override)
+init_channel_mode "$@"
 
 case "${1:-}" in
     --install)
@@ -2757,10 +2754,16 @@ case "${1:-}" in
         update_license "${2:-}"
         ;;
     --beta-on)
-        set_beta_config "true"
+        set_channel_config "beta"
         ;;
     --beta-off)
-        set_beta_config "false"
+        set_channel_config "production"
+        ;;
+    --staging-on)
+        set_channel_config "staging"
+        ;;
+    --staging-off)
+        set_channel_config "production"
         ;;
     --help)
         show_help
