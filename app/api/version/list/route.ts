@@ -43,11 +43,7 @@ export async function GET(req: Request) {
     const beta = isBetaMode(searchParams);
     const GITHUB_API_URL = getGithubApiUrl(beta);
 
-    // Debug logging
-    console.log("🔍 Version List API - Beta mode:", beta);
-    console.log("🔍 Beta param from URL:", searchParams.get("beta"), searchParams.get("BETA"));
-    console.log("🔍 GitHub API URL:", GITHUB_API_URL);
-    console.log("🔍 GITHUB_REPO_BETA:", process.env.GITHUB_REPO_BETA);
+
 
     // Check if beta mode is requested but not configured
     if (beta && !GITHUB_API_URL) {
