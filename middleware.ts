@@ -1,10 +1,11 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
-import { verifyAdminJwt } from "./lib/auth";
+import { COOKIE_NAME, verifyAdminJwt } from "./lib/auth";
 
 // List of public API routes that don't require authentication
 const publicApiRoutes = [
   "/api/login",
+  "/api/logout",
   "/api/register",
   "/api/license/create",
   "/api/license/validate",
@@ -35,7 +36,7 @@ export async function middleware(request: NextRequest) {
   }
 
   // For both API and non-API routes, check for auth cookie
-  const token = request.cookies.get("admin_token")?.value;
+  const token = request.cookies.get(COOKIE_NAME)?.value;
 
   // If API route and no token, return 401
   if (pathname.startsWith("/api")) {
