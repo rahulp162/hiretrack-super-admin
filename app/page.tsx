@@ -4,7 +4,8 @@ import LoginForm from "./components/LoginForm";
 import { COOKIE_NAME, verifyAdminJwt } from "@/lib/auth";
 
 export default async function Home() {
-  const token = cookies().get(COOKIE_NAME)?.value;
+  const cookieStore = await cookies();
+  const token = cookieStore.get(COOKIE_NAME)?.value;
 
   if (token) {
     const payload = await verifyAdminJwt(token);
