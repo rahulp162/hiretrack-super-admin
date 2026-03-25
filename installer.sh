@@ -301,7 +301,8 @@ set_channel_config() {
     if [ "$UPGRADE_CHOICE" = "y" ] || [ "$UPGRADE_CHOICE" = "yes" ]; then
         echo ""
         echo "🚀 Starting app upgrade..."
-        check_update_and_install "manually"
+        # check_update_and_install "manually"
+        schedule_update
     else
         echo "✅ Channel configuration saved. Exiting."
         exit 0
@@ -504,6 +505,55 @@ need_node_install() {
     return 0
 }
 
+# Resolve the absolute path to the globally installed `pm2` binary without
+# depending on shell PATH (cron often provides a minimal PATH).
+resolve_pm2_bin() {
+    local PM2_BIN=""
+
+    # 1) Fast path: already in PATH
+    PM2_BIN="$(command -v pm2 2>/dev/null || true)"
+    if [ -n "$PM2_BIN" ] && [ -x "$PM2_BIN" ]; then
+        echo "$PM2_BIN"
+        return 0
+    fi
+
+    # 2) npm bin -g (not supported on all npm versions)
+    local NPM_GLOBAL_BIN=""
+    NPM_GLOBAL_BIN="$(npm bin -g 2>/dev/null || true)"
+    if [ -n "$NPM_GLOBAL_BIN" ] && [ -x "$NPM_GLOBAL_BIN/pm2" ]; then
+        echo "$NPM_GLOBAL_BIN/pm2"
+        return 0
+    fi
+
+    # 3) npm prefix -g (most reliable alternative)
+    local NPM_PREFIX=""
+    NPM_PREFIX="$(npm prefix -g 2>/dev/null || true)"
+    if [ -n "$NPM_PREFIX" ] && [ -x "$NPM_PREFIX/bin/pm2" ]; then
+        echo "$NPM_PREFIX/bin/pm2"
+        return 0
+    fi
+
+    # 4) Infer prefix from npm root -g
+    local NPM_ROOT=""
+    NPM_ROOT="$(npm root -g 2>/dev/null || true)"
+    if [ -n "$NPM_ROOT" ]; then
+        local PREFIX_FROM_ROOT=""
+        PREFIX_FROM_ROOT="$(cd "$NPM_ROOT/../.." 2>/dev/null && pwd || true)"
+        if [ -n "$PREFIX_FROM_ROOT" ] && [ -x "$PREFIX_FROM_ROOT/bin/pm2" ]; then
+            echo "$PREFIX_FROM_ROOT/bin/pm2"
+            return 0
+        fi
+    fi
+
+    # 5) Common symlink location
+    if [ -x "/usr/local/bin/pm2" ]; then
+        echo "/usr/local/bin/pm2"
+        return 0
+    fi
+
+    return 1
+}
+
 check_pm2() {
     # Check if APP_INSTALL_DIR exists and contains required files
     if [ ! -d "$APP_INSTALL_DIR" ]; then
@@ -527,13 +577,140 @@ check_pm2() {
     else
         echo "📦 Installing PM2 globally..."
         npm install -g pm2
+        local PM2_BIN=""
+        PM2_BIN="$(resolve_pm2_bin || true)"
+        if [ -n "$PM2_BIN" ]; then
+            # Make PM2 discoverable via cron's PATH (/usr/local/bin).
+            ln -sf "$PM2_BIN" /usr/local/bin/pm2 >/dev/null 2>&1 || sudo ln -sf "$PM2_BIN" /usr/local/bin/pm2 >/dev/null 2>&1 || true
+            export PATH="$(dirname "$PM2_BIN"):$PATH"
+        fi
+
+        # Refresh shell command lookup cache (zsh/bash hash) if supported.
+        hash -r 2>/dev/null || true
+
         if command -v pm2 >/dev/null 2>&1; then
             echo "✅ PM2 installed."
         else
-            echo "❌ Failed to install PM2."
+            echo "❌ Failed to install PM2 (binary not discoverable after install)."
+            echo "   resolved pm2 bin: ${PM2_BIN:-unset}"
+            echo "   npm prefix -g: $(npm prefix -g 2>/dev/null || echo 'unknown')"
             exit 1
         fi
     fi
+}
+
+# ------------------------------------------------
+# PM2 Utility Functions (single source of truth)
+# ------------------------------------------------
+
+# Ensure PM2 processes are auto-saved and resurrected on reboot for the
+# current (non-root) user, using a cron @reboot entry.
+pm2_configure_autostart() {
+    local PM2_BIN
+    PM2_BIN=$(command -v pm2 2>/dev/null || echo "")
+    if [ -z "$PM2_BIN" ]; then
+        PM2_BIN="$(resolve_pm2_bin 2>/dev/null || true)"
+    fi
+    if [ -z "$PM2_BIN" ]; then
+        echo "⚠️ PM2 not found; skipping PM2 autostart configuration."
+        return 0
+    fi
+
+    # Enable PM2 autodump so process list is saved automatically on changes
+    "$PM2_BIN" set pm2:autodump true >/dev/null 2>&1 || true
+
+    # Ensure cron @reboot resurrect is present (non-root friendly)
+    local CURRENT_CRON PM2_REBOOT_LINE TMP_CRON
+    PM2_REBOOT_LINE="@reboot $PM2_BIN resurrect >> $HOME/pm2-startup.log 2>&1"
+    CURRENT_CRON=$(crontab -l 2>/dev/null || echo "")
+
+    # If the exact line already exists, nothing to do
+    if echo "$CURRENT_CRON" | grep -Fq "$PM2_REBOOT_LINE"; then
+        return 0
+    fi
+
+    TMP_CRON=$(mktemp)
+    printf "%s\n" "$CURRENT_CRON" > "$TMP_CRON"
+    # Remove any existing pm2 resurrect lines to avoid duplicates / loops
+    sed -i '/pm2 resurrect/d' "$TMP_CRON" 2>/dev/null || true
+    echo "$PM2_REBOOT_LINE" >> "$TMP_CRON"
+    crontab "$TMP_CRON"
+    rm -f "$TMP_CRON" >/dev/null 2>&1 || true
+}
+
+# Start (or restart) a single hiretrack PM2 process with a given name/version,
+# ensuring there is at most one process with that name.
+pm2_ensure_hiretrack_process() {
+    local APP_NAME="$1"
+    local APP_DIR="$2"
+    local PM2_BIN
+
+    PM2_BIN=$(command -v pm2 2>/dev/null || echo "")
+    if [ -z "$PM2_BIN" ]; then
+        PM2_BIN="$(resolve_pm2_bin 2>/dev/null || true)"
+    fi
+    if [ -z "$PM2_BIN" ]; then
+        echo "❌ PM2 not found when managing process: $APP_NAME"
+        return 1
+    fi
+
+    # Avoid duplicate processes with the same name: delete if it already exists.
+    "$PM2_BIN" delete "$APP_NAME" >/dev/null 2>&1 || true
+
+    # Start (or re-start) the app under PM2 with the requested name
+    local PM2_EXIT=0
+    # `set -e` is enabled globally; don't abort the whole installer on pm2 start failure.
+    set +e
+    (
+        cd "$APP_DIR" && \
+        "$PM2_BIN" start "npm run start" --name "$APP_NAME" --cwd "$APP_DIR"
+    )
+    PM2_EXIT=$?
+    set -e
+    if [ $PM2_EXIT -ne 0 ]; then
+        echo "❌ PM2 failed to start $APP_NAME (exit code: $PM2_EXIT)"
+        return $PM2_EXIT
+    fi
+
+    # Configure PM2 to survive reboots and persist its process list
+    pm2_configure_autostart
+    "$PM2_BIN" save --force >/dev/null 2>&1 || true
+
+    return 0
+}
+
+# Delete all existing hiretrack PM2 processes except the one we are about to run.
+# This prevents multiple versions from accumulating on servers.
+pm2_delete_other_hiretrack_processes() {
+    local TARGET_APP_NAME="$1"
+    local PM2_BIN PM2_JSON
+    local PM2_PROCS PROC
+
+    PM2_BIN=$(command -v pm2 2>/dev/null || echo "")
+    if [ -z "$PM2_BIN" ]; then
+        PM2_BIN="$(resolve_pm2_bin 2>/dev/null || true)"
+    fi
+    if [ -z "$PM2_BIN" ]; then
+        return 0
+    fi
+
+    # Prefer JSON for correct parsing (pm2 list is an ASCII table).
+    PM2_JSON="$("$PM2_BIN" jlist 2>/dev/null || true)"
+    if [ -n "$PM2_JSON" ] && command -v jq >/dev/null 2>&1; then
+        PM2_PROCS="$(echo "$PM2_JSON" | jq -r --arg t "$TARGET_APP_NAME" \
+            '.[] | select(.name | startswith("hiretrack-") and .name != $t) | .name' 2>/dev/null || true)"
+    else
+        # Fallback: best-effort text parsing.
+        PM2_PROCS="$("$PM2_BIN" list 2>/dev/null | awk '/hiretrack-/ {print $4}' || true)"
+    fi
+
+    for PROC in $PM2_PROCS; do
+        if [ -n "$PROC" ]; then
+            "$PM2_BIN" delete "$PROC" >/dev/null 2>&1 || true
+        fi
+    done
+
+    return 0
 }
 
 install_and_start_mongodb() {
@@ -1064,8 +1241,11 @@ clean_npm_install() {
     echo "🔍 npm path: $(command -v npm)"
 
     echo "📦 Running npm install in clean mode... in directory: ($PWD)..."
+    # Don't abort the whole installer on npm install failure; capture exit code below.
+    set +e
     npm install --legacy-peer-deps
     local NPM_EXIT=$?
+    set -e
     if [ $NPM_EXIT -ne 0 ]; then
         echo "❌ npm install failed with code $NPM_EXIT"
         return $NPM_EXIT
@@ -1307,6 +1487,29 @@ check_update_and_install() {
         log "⚠️ Directory $APP_INSTALL_DIR does not exist"
     fi
 
+    # To reduce memory pressure during dependency installation, stop the
+    # currently running hiretrack PM2 process for the installed version (if any).
+    # Do NOT run pm2 stop if this installer was started by the Node app (e.g. from
+    # the UI): stopping the app would kill our parent process and abort the installer.
+    if [ -n "$INSTALLED_VERSION" ] && [ "$INSTALLED_VERSION" != "none" ]; then
+        local OLD_APP_NAME="hiretrack-$INSTALLED_VERSION"
+        local PARENT_COMM
+        PARENT_COMM=$(ps -o comm= -p "$PPID" 2>/dev/null | xargs basename 2>/dev/null || true)
+        if [ -n "$PARENT_COMM" ] && [ "$PARENT_COMM" = "node" ]; then
+            log "⚠️ Skipping PM2 stop (installer likely started from app). npm install may use more memory."
+        else
+            log "🛑 Stopping currently running PM2 app: $OLD_APP_NAME (to free memory for npm install)..."
+            local PM2_BIN_FOR_STOP
+            PM2_BIN_FOR_STOP="$(resolve_pm2_bin 2>/dev/null || true)"
+            if [ -n "$PM2_BIN_FOR_STOP" ]; then
+                "$PM2_BIN_FOR_STOP" stop "$OLD_APP_NAME" >/dev/null 2>&1 || true
+            else
+                log "⚠️ PM2 not found; skipping stop for $OLD_APP_NAME."
+            fi
+            log "✅ PM2 stop completed; proceeding with npm install..."
+        fi
+    fi
+
     if ! clean_npm_install "$APP_INSTALL_DIR"; then
         log "❌ npm install failed."
         rm -f "$TMP_FILE" >/dev/null 2>&1 || true
@@ -1316,23 +1519,20 @@ check_update_and_install() {
     write_env_server_details
     check_pm2
     # ---------------------------------------------------
-    # PM2 Restart Logic (fixed and robust)
+    # PM2 Restart Logic (centralized helper)
     # ---------------------------------------------------
     log "🚀 Restarting PM2 process..."
     export PM2_HOME="$HOME/.pm2"
 
-    # Kill all old hiretrack processes safely
-    log "🗑️ Cleaning up old PM2 processes..."
-    
+    # Ensure we have exactly one hiretrack PM2 service (avoid duplicates).
+    pm2_delete_other_hiretrack_processes "$APP_NAME_WITH_VERSION"
 
-    # Start new hiretrack process   
-    pm2 start "npm run start" --name "$APP_NAME_WITH_VERSION" --cwd "$APP_INSTALL_DIR" || {
-        log "❌ Failed to start. Rolling back..."
-        pm2 delete "$APP_NAME_WITH_VERSION" || true
+    if ! pm2_ensure_hiretrack_process "$APP_NAME_WITH_VERSION" "$APP_INSTALL_DIR"; then
+        log "❌ Failed to start PM2 process for $APP_NAME_WITH_VERSION. Rolling back..."
         rm -f "$TMP_FILE" >/dev/null 2>&1 || true
         rollback
         return 1
-    }
+    fi
 
     ## Migrations
 
@@ -1352,10 +1552,10 @@ check_update_and_install() {
     log "✅ Successfully installed/updated to $VERSION_NAME at $APP_INSTALL_DIR"
     write_config "installedVersion" "$VERSION_NAME"
 
+    # After successful start and migrations, remove the previous version's PM2 process (if any)
     if [ -n "$INSTALLED_VERSION" ] && [ "$INSTALLED_VERSION" != "none" ]; then
-     pm2 delete "hiretrack-$INSTALLED_VERSION" || true
+        pm2 delete "hiretrack-$INSTALLED_VERSION" >/dev/null 2>&1 || true
     fi
-    pm2 save --force >/dev/null 2>&1 || true
 }
 
 
@@ -2600,6 +2800,53 @@ restart_pm2_service() {
 }
 
 # ------------------------------------------------
+# Schedule update (run in 2 minutes, detached from app)
+# Use from the app UI so the installer is not a child of Node and can stop the app.
+# ------------------------------------------------
+schedule_update() {
+    local SCHEDULE_MINS=2
+    local RUN_CMD="PATH=/usr/local/bin:/usr/bin:/bin $SCRIPT_PATH --update manually"
+    local LOG_FILE="$LOG_DIR/scheduled_update.log"
+
+    mkdir -p "$LOG_DIR"
+
+    # Prefer 'at' if available (run once at now + 2 min)
+    if command -v at >/dev/null 2>&1; then
+        if echo "PATH=/usr/local/bin:/usr/bin:/bin $SCRIPT_PATH --update manually >> $LOG_FILE 2>&1" | at "now + ${SCHEDULE_MINS} minutes" 2>/dev/null; then
+            echo "✅ Update scheduled in ${SCHEDULE_MINS} minutes. The app will restart automatically."
+            echo "   All users will see the new version after the update completes."
+            echo "   Log: $LOG_FILE"
+            return 0
+        fi
+    fi
+
+    # Fallback: one-off cron at (now + 2 min), self-removing after run
+    local CRON_MIN CRON_HOUR
+    CRON_MIN=$(date -d "+${SCHEDULE_MINS} minutes" "+%M" 2>/dev/null)
+    CRON_HOUR=$(date -d "+${SCHEDULE_MINS} minutes" "+%H" 2>/dev/null)
+    if [ -z "$CRON_MIN" ] || [ -z "$CRON_HOUR" ]; then
+        CRON_MIN=$(date -v+${SCHEDULE_MINS}M "+%M" 2>/dev/null)
+        CRON_HOUR=$(date -v+${SCHEDULE_MINS}M "+%H" 2>/dev/null)
+    fi
+    if [ -z "$CRON_MIN" ] || [ -z "$CRON_HOUR" ]; then
+        echo "❌ Could not compute schedule time. Install 'at' (apt install at / brew install at) or use: $SCRIPT_PATH --update manually"
+        return 1
+    fi
+
+    local CRON_LINE
+    CRON_LINE="${CRON_MIN} ${CRON_HOUR} * * * ( $RUN_CMD ; crontab -l 2>/dev/null | grep -v 'hiretrack-scheduled-update' | crontab - ) >> $LOG_FILE 2>&1 # hiretrack-scheduled-update"
+    local CURRENT_CRON
+    CURRENT_CRON=$(crontab -l 2>/dev/null || echo "")
+    # Remove any existing scheduled-update line to avoid duplicates
+    CURRENT_CRON=$(echo "$CURRENT_CRON" | grep -v 'hiretrack-scheduled-update' || true)
+    (echo "$CURRENT_CRON"; echo "$CRON_LINE") | crontab -
+
+    echo "✅ Update scheduled in ${SCHEDULE_MINS} minutes. The app will restart automatically."
+    echo "   All users will see the new version after the update completes."
+    echo "   Log: $LOG_FILE"
+}
+
+# ------------------------------------------------
 # Cron Setup
 # ------------------------------------------------
 setup_cron() {
@@ -2675,6 +2922,11 @@ show_help() {
     echo "                                Use 'manually' to skip auto-update validation check"
     echo "                                Example: $0 --update manually"
     echo
+    echo "  --schedule-update             Schedule an update in 2 minutes (for in-app trigger)."
+    echo "                                Use from the app UI so the update runs detached and can"
+    echo "                                stop the app to free memory. All users get the new version."
+    echo "                                Example: $0 --schedule-update"
+    echo
     echo "  --run-migrations [from] [to]  Run database migrations between versions"
     echo "                                Example: $0 --run-migrations 2.2.25 2.2.26"
     echo
@@ -2732,8 +2984,11 @@ case "${1:-}" in
         register_license "${2:-}"
         ;;
     --update)
-	    check_update_and_install "${2:-}" 
-       	;;
+        check_update_and_install "${2:-}"
+        ;;
+    --schedule-update)
+        schedule_update
+        ;;
     --run-migrations)
         run_migrations "${2:-}" "${3:-}"
         ;;
