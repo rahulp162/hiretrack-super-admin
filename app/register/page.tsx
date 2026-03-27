@@ -10,6 +10,7 @@ import ThemeToggle from "@/app/components/ui/ThemeToggle";
 
 export default function Register() {
   const router = useRouter();
+  const [canAccessRegister, setCanAccessRegister] = useState<boolean | null>(null);
   const [formData, setFormData] = useState({
     name: "",
     email: "",
@@ -20,6 +21,38 @@ export default function Register() {
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+
+  React.useEffect(() => {
+    let isMounted = true;
+
+    const checkRegisterAccess = async () => {
+      try {
+        const response = await fetch("/api/register", { method: "GET" });
+        if (!response.ok) {
+          router.push("/");
+          return;
+        }
+
+        const data = await response.json();
+        if (!data?.canAccessRegister) {
+          router.push("/");
+          return;
+        }
+
+        if (isMounted) {
+          setCanAccessRegister(true);
+        }
+      } catch {
+        router.push("/");
+      }
+    };
+
+    checkRegisterAccess();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [router]);
 
   const validateEmail = (email: string): boolean => {
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -123,6 +156,14 @@ export default function Register() {
       setLoading(false);
     }
   };
+
+  if (canAccessRegister === null) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900 transition-colors">
+        <LoadingSpinner />
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900 transition-colors px-4 py-8 relative">
