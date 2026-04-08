@@ -8,9 +8,12 @@ import { generateLicenseKey } from "@/lib/license";
 import crypto from 'crypto'; // 👈 1. Import crypto
 
 // 👈 2. Add your Private Key securely
-const LICENSE_PRIVATE_KEY = process.env.LICENSE_PRIVATE_KEY || `-----BEGIN PRIVATE KEY-----
+const RAW_LICENSE_PRIVATE_KEY = process.env.LICENSE_PRIVATE_KEY || `-----BEGIN PRIVATE KEY-----
 [YOUR_PRIVATE_KEY_HERE]
 -----END PRIVATE KEY-----`;
+
+/// 2. 🚨 THE FIX: Force Node to parse any literal "\n" characters into actual line breaks
+const LICENSE_PRIVATE_KEY = RAW_LICENSE_PRIVATE_KEY.replace(/\\n/g, '\n');
 
 // POST: Register a new license for a client with machine code
 export async function POST(req: Request) {
