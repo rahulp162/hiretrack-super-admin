@@ -59,7 +59,7 @@ else
 fi
 
 # Remove temporary .env (do not leave in repo)
-[ -f ".env" ] && rm -f .env
+# [ -f ".env" ] && rm -f .env
 
 if [ -f "$ARTIFACTS_FILE" ]; then
     echo "✅ Created $ARTIFACTS_FILE ($(du -h "$ARTIFACTS_FILE" | cut -f1))"

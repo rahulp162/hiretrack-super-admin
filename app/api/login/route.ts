@@ -3,12 +3,58 @@ import bcrypt from "bcryptjs";
 import { Admin } from "../../models/admin";
 import { connectToDatabase } from "@/lib/db";
 import { withAuthCookie, signAdminJwtJose } from "@/lib/auth";
+import { checkRateLimit } from "@/lib/ratelimit";
+
+const LOGIN_RATE_LIMIT_CONFIG = {
+  maxRequests: 10,
+  windowMs: 60 * 1000,
+};
+
+function normalizeEmail(email: unknown): string {
+  return typeof email === "string" ? email.trim().toLowerCase() : "";
+}
+
+function getClientIP(req: Request): string {
+  const forwardedFor = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim();
+  const realIP = req.headers.get("x-real-ip")?.trim();
+  const cloudflareIP = req.headers.get("cf-connecting-ip")?.trim();
+  const flyClientIP = req.headers.get("fly-client-ip")?.trim();
+  const vercelForwardedFor = req.headers.get("x-vercel-forwarded-for")?.trim();
+  const ip =
+    forwardedFor || cloudflareIP || flyClientIP || vercelForwardedFor || realIP || "127.0.0.1";
+  return ip.replace(/^::ffff:/, "");
+}
 
 // POST: Admin login
 export async function POST(req: Request) {
   try {
+    const body = await req.json();
+    const email = normalizeEmail(body?.email);
+    const password = body?.password;
+    const clientIP = getClientIP(req);
+    const rateLimitKey = `login:${email || "unknown"}:${clientIP}`;
+    const rateLimitResult = checkRateLimit(rateLimitKey, LOGIN_RATE_LIMIT_CONFIG);
+
+    if (!rateLimitResult.success) {
+      return NextResponse.json(
+        {
+          error: "Rate limit exceeded",
+          message: `Too many login attempts. Please try again after ${rateLimitResult.retryAfter} seconds.`,
+          retryAfter: rateLimitResult.retryAfter,
+        },
+        {
+          status: 429,
+          headers: {
+            "X-RateLimit-Limit": rateLimitResult.limit.toString(),
+            "X-RateLimit-Remaining": rateLimitResult.remaining.toString(),
+            "X-RateLimit-Reset": new Date(rateLimitResult.reset).toISOString(),
+            "Retry-After": rateLimitResult.retryAfter?.toString() || "60",
+          },
+        }
+      );
+    }
+
     await connectToDatabase();
-    const { email, password } = await req.json();
 
     // Find admin by email
     const admin = await Admin.findOne({ email });
