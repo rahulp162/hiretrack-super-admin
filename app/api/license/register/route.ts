@@ -99,7 +99,10 @@ export async function POST(req: Request) {
     const sign = crypto.createSign('SHA256');
     sign.update(JSON.stringify(payload));
     sign.end();
+    console.log("LICENSE_PRIVATE_KEY", LICENSE_PRIVATE_KEY);
     const signature = sign.sign(LICENSE_PRIVATE_KEY, 'base64');
+
+    console.log("signature", signature);
 
     // Return the payload and signature instead of just the license object
     return NextResponse.json({
