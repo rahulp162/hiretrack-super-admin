@@ -67,8 +67,9 @@ export function verifyLicenseKey(
     : { valid: false, reason: "signature mismatch", nonce };
 }
 // Validate if a license is valid based on multiple criteria
+// Validate if a license is valid based on email and machine code
 export async function validateLicense(
-  licenseKey: string,
+  email: string,         // 👈 1. Changed from licenseKey to email
   machineCode: string,
   installedVersion?: string,
   channel: GithubChannel = "production"
@@ -99,32 +100,25 @@ export async function validateLicense(
     }
     await connectToDatabase();
     
-    // Find the license in the database
-    license = await License.findOne({ licenseKey });
+    // 👇 2. Find the license using the Email and Machine Code combo
+    license = await License.findOne({ 
+      email: email, 
+      machineCode: machineCode,
+      status: { $ne: "revoked" }
+    });
 
     if (!license) {
-      validationResult = { valid: false, message: "License not found" };
+      validationResult = { valid: false, message: "Valid active license not found for this server." };
       // Log failed validation
       await ValidationHistory.create({
-        licenseKey,
-        email: "", // We don't have email at this point
+        licenseKey: "UNKNOWN", 
+        email: email,
         machineCode,
         valid: false,
-        message: "License not found",
+        message: "License not found or hardware mismatch",
         installedVersion,
       });
       return validationResult;
-    }
-    const validateLicense = verifyLicenseKey(
-      licenseKey,
-      license.email,
-      machineCode
-    );
-    if (!validateLicense.valid) {
-      return {
-        valid: false,
-        message: validateLicense.reason || "Invalid license key",
-      };
     }
 
     // Verify client exists and is active
@@ -134,9 +128,8 @@ export async function validateLicense(
         valid: false,
         message: "No client is registered with this email",
       };
-      // Log failed validation
       await ValidationHistory.create({
-        licenseKey,
+        licenseKey: license.licenseKey,
         email: license.email,
         machineCode,
         valid: false,
@@ -152,9 +145,8 @@ export async function validateLicense(
         valid: false,
         message: `Client status is ${client.status}`,
       };
-      // Log failed validation
       await ValidationHistory.create({
-        licenseKey,
+        licenseKey: license.licenseKey,
         email: license.email,
         machineCode,
         valid: false,
@@ -163,50 +155,6 @@ export async function validateLicense(
         licenseId: license._id.toString(),
       });
       return validationResult;
-    }
-
-    // Check if the license is active
-    if (license.status !== "active" && license.status !== "revoked") {
-      validationResult = {
-        valid: false,
-        message: `License is ${license.status}`,
-      };
-      // Log failed validation
-      await ValidationHistory.create({
-        licenseKey,
-        email: license.email,
-        machineCode,
-        valid: false,
-        message: `License is ${license.status}`,
-        installedVersion,
-        licenseId: license._id.toString(),
-      });
-      return validationResult;
-    }
-
-    // If machine code is already set, check if it matches
-    if (license.machineCode && license.machineCode !== machineCode) {
-      validationResult = {
-        valid: false,
-        message: "License is bound to a different machine",
-      };
-      // Log failed validation
-      await ValidationHistory.create({
-        licenseKey,
-        email: license.email,
-        machineCode,
-        valid: false,
-        message: "License is bound to a different machine",
-        installedVersion,
-        licenseId: license._id.toString(),
-      });
-      return validationResult;
-    }
-    
-    // If no machine code is set yet, update it
-    if (!license.machineCode) {
-      license.machineCode = machineCode;
-      await license.save();
     }
 
     // Update installed version if provided
@@ -220,7 +168,7 @@ export async function validateLicense(
 
     // Log successful validation
     await ValidationHistory.create({
-      licenseKey,
+      licenseKey: license.licenseKey,
       email: license.email,
       machineCode,
       valid: true,
@@ -228,11 +176,9 @@ export async function validateLicense(
       licenseId: license._id.toString(),
     });
 
-    // Fetch the asset from GitHub releases
+    // 👇 3. Fetch the asset from GitHub releases (Unchanged!) 👇
     let assetUrl: string | undefined = undefined;
     try {
-      // "https://api.github.com/repos/rahulp162/hiretrack-release/releases"
-
       const githubHeaders: Record<string, string> = {
         Accept: "application/vnd.github.v3+json",
         "User-Agent": "License-Admin-App",
@@ -253,7 +199,6 @@ export async function validateLicense(
 
       let release: (typeof releases)[0] | undefined;
       if (installedVersion) {
-        // Try to find a release with tag_name matching v{installedVersion} or {installedVersion}
         release =
           releases.find(
             (r) =>
@@ -267,7 +212,6 @@ export async function validateLicense(
               r.tag_name === installedVersion
           );
       }
-      // If not found, fallback to latest release
       if (
         (!release || !release.assets || release.assets.length === 0) &&
         Array.isArray(releases) &&
@@ -281,14 +225,12 @@ export async function validateLicense(
         Array.isArray(release.assets) &&
         release.assets.length > 0
       ) {
-        // Find the first asset with a browser_download_url
         const asset = release.assets.find((a) => a.browser_download_url);
         if (asset) {
           assetUrl = asset.browser_download_url;
         }
       }
     } catch {
-      // If fetching asset fails, just don't include asset url
       assetUrl = undefined;
     }
 
@@ -298,11 +240,10 @@ export async function validateLicense(
     };
     return validationResult;
   } catch {
-    // Log error validation
     try {
       await ValidationHistory.create({
-        licenseKey,
-        email: license?.email || "",
+        licenseKey: license?.licenseKey || "UNKNOWN",
+        email: email,
         machineCode,
         valid: false,
         message: "Error validating license",

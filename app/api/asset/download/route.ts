@@ -27,7 +27,9 @@ export async function GET(req: Request) {
   try {
     await connectToDatabase();
     const { searchParams } = new URL(req.url);
-    const licenseKey = searchParams.get("licenseKey");
+    
+    // 👇 1. Grab 'email' instead of 'licenseKey'
+    const email = searchParams.get("email"); 
     const machineCode = searchParams.get("machineCode");
     const installedVersion = searchParams.get("installedVersion") || searchParams.get("version");
     const channel = getChannel(searchParams);
@@ -46,25 +48,26 @@ export async function GET(req: Request) {
       );
     }
 
-    // Validate required parameters
-    if (!licenseKey || !machineCode) {
+    // 👇 2. Update the validation check
+    if (!email || !machineCode) {
       return NextResponse.json(
         {
           status: false,
-          error: "licenseKey and machineCode parameters are required",
+          error: "email and machineCode parameters are required",
         },
         { status: 400 }
       );
     }
 
     // License verification
-    // Validate the license
+    // 👇 3. Pass the 'email' into your validation function
     const validationResult = await validateLicense(
-      licenseKey,
+      email, 
       machineCode,
       installedVersion || undefined,
       channel
     );
+    
     if (!validationResult.valid) {
       return NextResponse.json(
         {
