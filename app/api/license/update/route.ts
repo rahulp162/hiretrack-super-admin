@@ -102,7 +102,7 @@ export async function PATCH(req: Request) {
       changesMade = true;
     }
 
-    // Save the updates to MongoDB
+    // Save the updates to MongoDB@
     if (changesMade) {
       await existingLicense.save();
     }
