@@ -94,27 +94,19 @@ export async function POST(req: Request) {
     // 👇 3. NEW CRYPTOGRAPHIC LOGIC STARTS HERE 👇
 
     // Build the payload that the client will verify offline
-    const payload = {
-        licenseKey: newLicense.licenseKey,
-        email: newLicense.email,
-        machineCode: newLicense.machineCode
-    };
+    // const payload = {
+    //     licenseKey: newLicense.licenseKey,
+    //     email: newLicense.email,
+    //     machineCode: newLicense.machineCode
+    // };
 
-    // Sign the payload
+    // Admin API POST Route
     const sign = crypto.createSign('SHA256');
-    sign.update(JSON.stringify(payload));
+    sign.update(machineCode); // ONLY the machine code string
     sign.end();
-    console.log("LICENSE_PRIVATE_KEY", LICENSE_PRIVATE_KEY);
     const signature = sign.sign(LICENSE_PRIVATE_KEY, 'base64');
 
-    console.log("signature", signature);
-
-    // Return the payload and signature instead of just the license object
-    return NextResponse.json({
-      message: "License registered successfully",
-      payload: payload,
-      signature: signature
-    });
+    return NextResponse.json({ signature: signature });
 
   } catch (error: unknown) {
     console.error("Error registering license:", error);
